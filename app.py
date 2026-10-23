@@ -1,251 +1,158 @@
-import openpyxl
-from openpyxl.formatting.rule import CellIsRule
-from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
-from openpyxl.utils import get_column_letter
+import io
+import os
+import pandas as pd
+import pypdf
+import streamlit as st
+from openai import AzureOpenAI
 
-# 1. Criar o arquivo e a aba principal
-wb = openpyxl.Workbook()
-ws = wb.active
-ws.title = "Medição de Obra"
-
-# Garantir exibição das linhas de grade no Excel
-ws.views.sheetView[0].showGridLines = True
-
-# 2. Definição da Paleta de Cores e Estilos
-NAVY_HEADER = "1E3A8A"  # Azul Marinho para o cabeçalho
-ZEBRA_FILL = "F8FAFC"  # Cinza suave para alternar linhas
-CARD_BG = "F1F5F9"  # Fundo para destaques de grupo
-
-font_title = Font(name="Segoe UI", size=16, bold=True, color="1E293B")
-font_subtitle = Font(name="Segoe UI", size=10, italic=True, color="64748B")
-font_header = Font(name="Segoe UI", size=10, bold=True, color="FFFFFF")
-font_data = Font(name="Segoe UI", size=10, color="0F172A")
-font_bold = Font(name="Segoe UI", size=10, bold=True, color="0F172A")
-
-fill_header = PatternFill(
-    start_color=NAVY_HEADER, end_color=NAVY_HEADER, fill_type="solid"
-)
-fill_zebra = PatternFill(
-    start_color=ZEBRA_FILL, end_color=ZEBRA_FILL, fill_type="solid"
-)
-fill_card = PatternFill(
-    start_color=CARD_BG, end_color=CARD_BG, fill_type="solid"
+# Configuração inicial da página do Streamlit
+st.set_page_config(
+    page_title="ChatBot RAG - Microsoft Foundry", page_icon="🤖", layout="centered"
 )
 
-thin_side = Side(border_style="thin", color="CBD5E1")
-thick_bottom = Side(border_style="medium", color="1E3A8A")
-double_bottom = Side(border_style="double", color="1E3A8A")
-
-border_cell = Border(
-    left=thin_side, right=thin_side, top=thin_side, bottom=thin_side
+# 1. Interface e Estilo (CSS Customizado para Borda e Aparência Profissional)
+st.markdown(
+    """
+    <style>
+        .stApp {
+            background-color: #f4f6f9;
+        }
+        [data-testid="stSidebar"] {
+            background-color: #ffffff;
+            border-right: 1px solid #e2e8f0;
+        }
+        .main-content-box {
+            border: 2px solid #cbd5e1;
+            border-radius: 12px;
+            padding: 20px;
+            background-color: #ffffff;
+            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
+            margin-bottom: 20px;
+        }
+        h1 {
+            color: #1e293b;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+        }
+    </style>
+""",
+    unsafe_allow_html=True,
 )
-border_header = Border(
-    left=thin_side, right=thin_side, top=thin_side, bottom=thick_bottom
+
+# 2. Configuração da API (Microsoft Foundry / Azure AI)
+API_KEY = "6t2pTNsmNafDyo53MDAFIrvvQRBZXP7dLcr5j3TLxMS34LQVq3ZUJQQJ99CHACHYHv6XJ3w3AAAAACOGT7os"
+DEPLOYMENT_NAME = "gpt-4.1-mini"
+ENDPOINT = "https://marcelomaffeis-05082026-resource.services.ai.azure.com/"
+
+# Inicialização segura do cliente Azure OpenAI
+client = None
+try:
+  client = AzureOpenAI(
+      api_key=API_KEY, api_version="2024-02-01", azure_endpoint=ENDPOINT
+  )
+except Exception as e:
+  st.error(f"Erro ao configurar o cliente da API: {e}")
+
+# Título da Aplicação
+st.title("🤖 ChatBot Inteligente com RAG")
+st.markdown(
+    "Faça upload de um documento (**Excel**, **PDF** ou **TXT**) na barra"
+    " lateral para utilizá-lo como contexto."
 )
-border_total = Border(top=thin_side, bottom=double_bottom)
 
-align_center = Alignment(horizontal="center", vertical="center")
-align_left = Alignment(horizontal="left", vertical="center")
-align_right = Alignment(horizontal="right", vertical="center")
+# Inicialização do Session State para persistência
+if "document_text" not in st.session_state:
+  st.session_state.document_text = ""
 
-# 3. Cabeçalho de Identificação da Obra
-ws.merge_cells("A1:K1")
-ws["A1"] = "RELATÓRIO DE MEDIÇÃO DE OBRA"
-ws["A1"].font = font_title
+if "messages" not in st.session_state:
+  st.session_state.messages = []
 
-ws.merge_cells("A2:K2")
-ws["A2"] = "Acompanhamento Físico-Financeiro dos Serviços de Engenharia"
-ws["A2"].font = font_subtitle
+# 3. Upload de Arquivos e Sistema RAG na Barra Lateral
+st.sidebar.header("📁 Base de Conhecimento")
+uploaded_file = st.sidebar.file_uploader(
+    "Envie seu arquivo (Excel, PDF ou TXT)", type=["xlsx", "xls", "pdf", "txt"]
+)
 
-info_labels = [
-    ("Obra:", "Construção de Edifício Residencial - Bloco A"),
-    ("Contratante:", "Construtora Horizonte S/A"),
-    ("Medição Nº:", "03 / 2026"),
-    ("Período:", "01/10/2026 a 31/10/2026"),
-]
+# Processamento seguro do arquivo carregado
+if uploaded_file is not None:
+  file_extension = uploaded_file.name.split(".")[-1].lower()
+  try:
+    if file_extension == "txt":
+      st.session_state.document_text = uploaded_file.getvalue().decode("utf-8")
+      st.sidebar.success(f"TXT '{uploaded_file.name}' carregado com sucesso!")
 
-for idx, (label, val) in enumerate(info_labels):
-  row = 4 + idx // 2
-  col_label = 1 if idx % 2 == 0 else 7
-  ws.cell(row=row, column=col_label, value=label).font = font_bold
-  ws.cell(row=row, column=col_label + 1, value=val).font = font_data
+    elif file_extension == "pdf":
+      pdf_reader = pypdf.PdfReader(io.BytesIO(uploaded_file.getvalue()))
+      extracted_text = ""
+      for page in pdf_reader.pages:
+        text = page.extract_text()
+        if text:
+          extracted_text += text + "\n"
+      st.session_state.document_text = extracted_text
+      st.sidebar.success(f"PDF '{uploaded_file.name}' carregado com sucesso!")
 
-# 4. Tabela Principal de Medição
-headers = [
-    "Item",
-    "Descrição do Serviço",
-    "Unid.",
-    "Qtd. Prevista",
-    "Preço Unit. (R$)",
-    "Valor Total (R$)",
-    "Qtd. Medida",
-    "Valor Medido (R$)",
-    "Qtd. Acumulada",
-    "Valor Acumulado (R$)",
-    "% Executado",
-]
+    elif file_extension in ["xlsx", "xls"]:
+      # Leitura de planilhas Excel convertendo em texto estruturado para o RAG
+      df = pd.read_excel(uploaded_file)
+      st.session_state.document_text = df.to_string(index=False)
+      st.sidebar.success(f"Excel '{uploaded_file.name}' carregado com sucesso!")
 
-header_row = 7
-for col_idx, text in enumerate(headers, 1):
-  cell = ws.cell(row=header_row, column=col_idx, value=text)
-  cell.font = font_header
-  cell.fill = fill_header
-  cell.alignment = align_center
-  cell.border = border_header
+  except Exception as e:
+    st.sidebar.error(f"Erro ao processar o arquivo: {e}")
+    st.session_state.document_text = ""
 
-# 5. Dados dos Serviços e Inserção das Fórmulas do Excel
-servicos = [
-    ("1.0", "SERVIÇOS PRELIMINARES", "", "", "", "", ""),
-    ("1.1", "Canteiro de obras e mobilização", "M2", 150.0, 120.00, 150.0, 0.0),
-    ("1.2", "Limpeza e gabarito do terreno", "M2", 800.0, 25.00, 800.0, 0.0),
-    ("2.0", "INFRAESTRUTURA", "", "", "", "", ""),
-    ("2.1", "Escavação mecânica para fundações", "M3", 350.0, 45.00, 350.0, 0.0),
-    (
-        "2.2",
-        "Estacas escavadas em concreto armado",
-        "M",
-        420.0,
-        180.00,
-        300.0,
-        120.0,
-    ),
-    ("2.3", "Blocos de coroamento e baldrame", "M3", 85.0, 950.00, 40.0, 45.0),
-    ("3.0", "SUPRAESTRUTURA", "", "", "", "", ""),
-    (
-        "3.1",
-        "Concreto armado fck=30MPa para pilares",
-        "M3",
-        110.0,
-        850.00,
-        0.0,
-        55.0,
-    ),
-    ("3.2", "Formas de madeira plastificada", "M2", 1450.0, 65.00, 0.0, 600.0),
-    ("3.3", "Aço CA-50 cortado e dobrado", "KG", 12500.0, 12.50, 0.0, 4500.0),
-    ("4.0", "ALVENARIA E FECHAMENTOS", "", "", "", "", ""),
-    (
-        "4.1",
-        "Alvenaria de vedação bloco cerâmico 14x19x29",
-        "M2",
-        2200.0,
-        58.00,
-        0.0,
-        350.0,
-    ),
-]
+# Exibir indicador de contexto ativo na barra lateral
+if st.session_state.document_text:
+  st.sidebar.info(
+      "📄 Contexto carregado e pronto para consultas no chat!"
+  )
 
-start_data_row = 8
-current_row = start_data_row
+# 4. Lógica de Chat
+for message in st.session_state.messages:
+  with st.chat_message(message["role"]):
+    st.markdown(message["content"])
 
-for item in servicos:
-  code, desc, unid, qtd_prev, preco, qtd_ant, qtd_atual = item
-  is_group = unid == ""
+# Capturar entrada do usuário
+if prompt := st.chat_input(
+    "Digite sua mensagem ou pergunta sobre a planilha/documento..."
+):
+  st.session_state.messages.append({"role": "user", "content": prompt})
+  with st.chat_message("user"):
+    st.markdown(prompt)
 
-  ws.cell(row=current_row, column=1, value=code).alignment = align_center
-  ws.cell(row=current_row, column=2, value=desc).alignment = align_left
-  ws.cell(row=current_row, column=3, value=unid).alignment = align_center
+  # Construção do Prompt do Sistema (RAG Contextual)
+  system_prompt = (
+      "Você é um assistente virtual especialista e prestativo em análise de"
+      " dados e engenharia. Responda de maneira clara e objetiva."
+  )
 
-  if is_group:
-    # Agrupador/Subtotal
-    for c in range(1, 12):
-      cell = ws.cell(row=current_row, column=c)
-      cell.font = font_bold
-      cell.fill = fill_card
-  else:
-    # Item com Fórmulas do Excel
-    ws.cell(row=current_row, column=4, value=qtd_prev).number_format = (
-        "#,##0.00"
-    )
-    ws.cell(row=current_row, column=5, value=preco).number_format = (
-        "R$ #,##0.00"
+  if st.session_state.document_text:
+    system_prompt += (
+        "\n\nUtilize obrigatoriamente as informações abaixo extraídas do"
+        f" documento/planilha enviado pelo usuário para formular sua"
+        f" resposta:\n--- INÍCIO DO CONTEXTO ---\n{st.session_state.document_text}\n--- FIM"
+        " DO CONTEXTO ---\nSe a informação necessária não estiver presente no"
+        " contexto, informe educadamente."
     )
 
-    # Valor Total Previsto = Qtd Prevista * Preço Unit.
-    ws.cell(
-        row=current_row, column=6, value=f"=D{current_row}*E{current_row}"
-    ).number_format = "R$ #,##0.00"
+  # Montagem das mensagens para a API
+  messages_payload = [{"role": "system", "content": system_prompt}]
+  for m in st.session_state.messages:
+    messages_payload.append({"role": m["role"], "content": m["content"]})
 
-    # Qtd Medida Atual
-    ws.cell(row=current_row, column=7, value=qtd_atual).number_format = (
-        "#,##0.00"
-    )
-
-    # Valor Medido = Qtd Medida * Preço Unit.
-    ws.cell(
-        row=current_row, column=8, value=f"=G{current_row}*E{current_row}"
-    ).number_format = "R$ #,##0.00"
-
-    # Qtd Acumulada = Qtd Anterior + Qtd Atual
-    ws.cell(
-        row=current_row, column=9, value=f"={qtd_ant}+{qtd_atual}"
-    ).number_format = "#,##0.00"
-
-    # Valor Acumulado = Qtd Acumulada * Preço Unit.
-    ws.cell(
-        row=current_row, column=10, value=f"=I{current_row}*E{current_row}"
-    ).number_format = "R$ #,##0.00"
-
-    # % Executado = Qtd Acumulada / Qtd Prevista
-    ws.cell(
-        row=current_row,
-        column=11,
-        value=f"=IF(D{current_row}>0, I{current_row}/D{current_row}, 0)",
-    ).number_format = "0.0%"
-
-    for c in range(1, 12):
-      cell = ws.cell(row=current_row, column=c)
-      cell.font = font_data
-      cell.border = border_cell
-      if current_row % 2 == 1:
-        cell.fill = fill_zebra
-
-  current_row += 1
-
-# 6. Linha de Total Geral
-tot_row = current_row
-ws.cell(row=tot_row, column=2, value="TOTAL GERAL").font = font_bold
-ws.cell(row=tot_row, column=2).alignment = align_right
-
-ws.cell(
-    row=tot_row, column=6, value=f"=SUM(F{start_data_row}:F{tot_row-1})"
-).number_format = "R$ #,##0.00"
-ws.cell(
-    row=tot_row, column=8, value=f"=SUM(H{start_data_row}:H{tot_row-1})"
-).number_format = "R$ #,##0.00"
-ws.cell(
-    row=tot_row, column=10, value=f"=SUM(J{start_data_row}:J{tot_row-1})"
-).number_format = "R$ #,##0.00"
-ws.cell(
-    row=tot_row, column=11, value=f"=J{tot_row}/F{tot_row}"
-).number_format = "0.0%"
-
-for c in range(1, 12):
-  cell = ws.cell(row=tot_row, column=c)
-  cell.font = font_bold
-  cell.border = border_total
-
-# 7. Formatação Condicional (Destacar itens 100% concluídos em verde)
-rule_green = CellIsRule(
-    operator="greaterThanOrEqual",
-    formula=["1"],
-    stopIfTrue=True,
-    font=Font(color="065F46", bold=True),
-    fill=PatternFill(start_color="D1FAE5", fill_type="solid"),
-)
-ws.conditional_formatting.add(f"K{start_data_row}:K{tot_row-1}", rule_green)
-
-# 8. Ajuste Automático de Largura das Colunas
-for col in ws.columns:
-  max_len = 0
-  col_letter = get_column_letter(col[0].column)
-  for cell in col:
-    if cell.row < 7:
-      continue
-    if len(str(cell.value or "")) > max_len:
-      max_len = len(str(cell.value or ""))
-  ws.column_dimensions[col_letter].width = max(max_len + 3, 12)
-
-ws.column_dimensions["B"].width = 45  # Descrição com maior espaço
-
-# Salvar Arquivo
-wb.save("Planilha_de_Medicao_Obra.xlsx")
+  # Chamada à API da Microsoft Foundry (Azure OpenAI)
+  with st.chat_message("assistant"):
+    with st.spinner("Analisando e gerando resposta..."):
+      if client is None:
+        st.error("Cliente da API não foi inicializado corretamente.")
+      else:
+        try:
+          response = client.chat.completions.create(
+              model=DEPLOYMENT_NAME, messages=messages_payload, temperature=0.7
+          )
+          bot_response = response.choices[0].message.content
+          st.markdown(bot_response)
+          st.session_state.messages.append(
+              {"role": "assistant", "content": bot_response}
+          )
+        except Exception as e:
+          st.error(f"Erro ao se comunicar com a API do Microsoft Foundry: {e}")
